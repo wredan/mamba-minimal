@@ -43,7 +43,7 @@ class ModelArgs:
     bias: bool = False
     
     def __post_init__(self):
-        self.d_inner = int(self.expand * self.d_model)
+        self.d_inner = int(self.expand * self.d_model)  # That's why reducing d_model keeps the network low on params
         
         if self.dt_rank == 'auto':
             self.dt_rank = math.ceil(self.d_model / 16)
@@ -59,9 +59,9 @@ class Mamba(nn.Module):
         super().__init__()
         self.args = args
         
-        self.embedding = nn.Embedding(args.vocab_size, args.d_model)
+        self.embedding = nn.Embedding(args.vocab_size, args.d_model)  # That's why reducing d_model keeps the network low on params
         self.layers = nn.ModuleList([ResidualBlock(args) for _ in range(args.n_layer)])
-        self.norm_f = RMSNorm(args.d_model)
+        self.norm_f = RMSNorm(args.d_model)  # That's why reducing d_model keeps the network low on params
 
         self.lm_head = nn.Linear(args.d_model, args.vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight  # Tie output projection to embedding weights.
@@ -222,6 +222,7 @@ class MambaBlock(nn.Module):
         x_and_res = self.in_proj(x)  # shape (b, l, 2 * d_in)
         (x, res) = x_and_res.split(split_size=[self.args.d_inner, self.args.d_inner], dim=-1)
 
+        # --- left branch ---
         x = rearrange(x, 'b l d_in -> b d_in l')
         x = self.conv1d(x)[:, :, :l]
         x = rearrange(x, 'b d_in l -> b l d_in')
@@ -229,7 +230,9 @@ class MambaBlock(nn.Module):
         x = F.silu(x)
 
         y = self.ssm(x)
-        
+        # --- end left branch ---
+
+        # --- right branch (residual) ---
         y = y * F.silu(res)
         
         output = self.out_proj(y)
@@ -284,12 +287,12 @@ class MambaBlock(nn.Module):
         except B and C (and the step size delta, which is used for discretization) are dependent on the input x(t).
     
         Args:
-            u: shape (b, l, d_in)    (See Glossary at top for definitions of b, l, d_in, n...)
+            u: shape (b, l, d_in)    (See Glossary at top for definitions of b, l, d_in, n...). It's the new input, aka the new "token" (referring to dynamic systems theory)
             delta: shape (b, l, d_in)
             A: shape (d_in, n)
             B: shape (b, l, n)
             C: shape (b, l, n)
-            D: shape (d_in,)
+            D: shape (d_in,) (used as a skip connection (residual), see Part 1: SSM in The Annotated S4 [2])
     
         Returns:
             output: shape (b, l, d_in)
@@ -310,8 +313,8 @@ class MambaBlock(nn.Module):
         deltaB_u = einsum(delta, B, u, 'b l d_in, b l n, b l d_in -> b l d_in n')
         
         # Perform selective scan (see scan_SSM() in The Annotated S4 [2])
-        # Note that the below is sequential, while the official implementation does a much faster parallel scan that
-        # is additionally hardware-aware (like FlashAttention).
+        # ! Note that the below is sequential, while the official implementation does a much faster parallel scan that
+        # ! is additionally hardware-aware (like FlashAttention).
         x = torch.zeros((b, d_in, n), device=deltaA.device)
         ys = []    
         for i in range(l):
@@ -320,7 +323,7 @@ class MambaBlock(nn.Module):
             ys.append(y)
         y = torch.stack(ys, dim=1)  # shape (b, l, d_in)
         
-        y = y + u * D
+        y = y + u * D  # D skip connection
     
         return y
 
