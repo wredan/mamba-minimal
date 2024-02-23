@@ -27,8 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 from einops import rearrange, repeat, einsum
-
-
+import nobuco
 @dataclass
 class ModelArgs:
     d_model: int
@@ -274,6 +273,15 @@ class MambaBlock(nn.Module):
         
         return y
 
+    @nobuco.traceable
+    def selective_scan_loop(self, l, x, deltaA, deltaB_u, C):
+        ys = []
+        for i in range(l):
+            x = deltaA[:, i] * x + deltaB_u[:, i]
+            y = einsum(x, C[:, i, :], 'b d_in n, b n -> b d_in')
+            ys.append(y)
+        y = torch.stack(ys, dim=1)  # shape (b, l, d_in)
+        return y
     
     def selective_scan(self, u, delta, A, B, C, D):
         """Does selective scan algorithm. See:
