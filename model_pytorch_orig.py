@@ -283,7 +283,7 @@ class MambaBlock(nn.Module):
         y = torch.stack(ys, dim=1)  # shape (b, l, d_in)
         return y
     
-    def selective_scan(self, u, dt, A, B, C, D):
+    def selective_scan(self, u, delta, A, B, C, D):
         """Does selective scan algorithm. See:
             - Section 2 State Space Models in the Mamba paper [1]
             - Algorithm 2 in Section 3.2 in the Mamba paper [1]
@@ -310,60 +310,30 @@ class MambaBlock(nn.Module):
             Note: I refactored some parts out of `selective_scan_ref` out, so the functionality doesn't match exactly.
             
         """
-
+        (b, l, d_in) = u.shape
+        n = A.shape[1]
+        
         # Discretize continuous parameters (A, B)
         # - A is discretized using zero-order hold (ZOH) discretization (see Section 2 Equation 4 in the Mamba paper [1])
         # - B is discretized using a simplified Euler discretization instead of ZOH. From a discussion with authors:
         #   "A is the more important term and the performance doesn't change much with the simplification on B"
-                
-        # deltaA = torch.einsum('bld,dn->bldn', dt, A)
-        # deltaB_u = torch.einsum('bld,bld,bln->bldn', dt, u, B)
-
-        # ESPANSIONE DI deltaA = torch.einsum('bld,dn->bldn', dt, A)
-        # Passo 1: Ridimensiona A per il broadcasting
-        # A.view(1, 1, d, n).expand(b, l, d, n)
-        A_expanded = A.view(1, 1, dt.size(2), A.size(1)).expand(dt.size(0), dt.size(1), dt.size(2), A.size(1)) 
-
-        # Passo 2: Moltiplica dt per A_expanded
-        # Poiché vogliamo mantenere dt inalterato e solo "applicare" A a ogni elemento, 
-        # dobbiamo prima aggiungere dimensioni a dt per il broadcasting.
-        dt_expanded = dt.unsqueeze(-1)  # Aggiunge una dimensione alla fine per il broadcasting
-
-        # Moltiplicazione elemento per elemento
-        deltaA = dt_expanded * A_expanded
-
-        # ESPANSIONE DI deltaB_u = torch.einsum('bld,bld,bln->bldn', dt, u, B)
-        # Passo 1: Moltiplicazione elemento per elemento di dt e u
-        dt_u_product = dt * u  # Il risultato ha forma (b, l, d)
-
-        # Passo 2: Espandi il risultato aggiungendo una nuova dimensione per il broadcasting
-        dt_u_expanded = dt_u_product.unsqueeze(-1)  # Aggiunge una dimensione fittizia alla fine, forma (b, l, d, 1)
-
-        # Passo 3: Espandi B per il broadcasting
-        B_expanded = B.unsqueeze(2)  # Aggiunge una dimensione fittizia nella terza posizione, forma (b, l, 1, n)
-
-        # Passo 4: Moltiplicazione elemento per elemento con broadcasting
-        deltaB_u = dt_u_expanded * B_expanded  # Il risultato ha forma (b, l, d, n)
-
+        deltaA = torch.exp(einsum(delta, A, 'b l d_in, d_in n -> b l d_in n'))
+        deltaB_u = einsum(delta, B, u, 'b l d_in, b l n, b l d_in -> b l d_in n')
+        
         # Perform selective scan (see scan_SSM() in The Annotated S4 [2])
         # ! Note that the below is sequential, while the official implementation does a much faster parallel scan that
         # ! is additionally hardware-aware (like FlashAttention).
+        x = torch.zeros((b, d_in, n), device=deltaA.device)
+        ys = []    
+        for i in range(l):
+            x = deltaA[:, i] * x + deltaB_u[:, i]
+            y = einsum(x, C[:, i, :], 'b d_in n, b n -> b d_in')
+            ys.append(y)
+        y = torch.stack(ys, dim=1)  # shape (b, l, d_in)
         
-        dA_cumsum = F.pad(deltaA[:, 1:], (0, 0, 0, 0, 0, 1)).flip(1).cumsum(1).exp().flip(1)
-        x = deltaB_u * dA_cumsum
-        x = x.cumsum(1) / (dA_cumsum + 1e-12)
-
-        # ESPANSIONE DI y = torch.einsum('bldn,bln->bld', x, C)
-        # Espandi C per il broadcasting
-        C_expanded = C.unsqueeze(2)  # La forma diventa (b, l, 1, n)
-
-        # Moltiplica x e C con broadcasting
-        product = torch.mul(x, C_expanded)
-
-        # Somma lungo l'asse n per ottenere la forma finale (b, l, d)
-        y = torch.sum(product, dim=-1)
+        y = y + u * D  # D skip connection
     
-        return y + u * D # D skip connection
+        return y
 
 
 class RMSNorm(nn.Module):
