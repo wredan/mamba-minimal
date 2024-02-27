@@ -319,31 +319,26 @@ class MambaBlock(nn.Module):
         # deltaA = torch.einsum('bld,dn->bldn', dt, A)
         # deltaB_u = torch.einsum('bld,bld,bln->bldn', dt, u, B)
 
-        # ESPANSIONE DI deltaA = torch.einsum('bld,dn->bldn', dt, A)
-        # Passo 1: Ridimensiona A per il broadcasting
-        # A.view(1, 1, d, n).expand(b, l, d, n)
-        A_expanded = A.view(1, 1, dt.size(2), A.size(1)).expand(dt.size(0), dt.size(1), dt.size(2), A.size(1)) 
+        #! EXPANSION OF deltaA = torch.einsum('bld,dn->bldn', dt, A)
+        # Add a dimension to dt to prepare it for broadcasting
+        # This step is necessary to align the dimensions of dt and A for multiplication
+        # The new dimension is added at the end to make room for the n dimension of A during multiplication
+        dt_expanded = dt.unsqueeze(-1)  # Transforms dt into a shape [b, l, d, 1]
 
-        # Passo 2: Moltiplica dt per A_expanded
-        # Poiché vogliamo mantenere dt inalterato e solo "applicare" A a ogni elemento, 
-        # dobbiamo prima aggiungere dimensioni a dt per il broadcasting.
-        dt_expanded = dt.unsqueeze(-1)  # Aggiunge una dimensione alla fine per il broadcasting
+        # Multiplication with implicit broadcasting
+        # Here, explicitly expanding A is not necessary because PyTorch handles the broadcasting automatically.
+        # dt_expanded has shape [b, l, d, 1], and A has shape [d, n]. PyTorch "aligns" these shapes to match.
+        # A is "seen" as if it had shape [1, 1, d, n], and is automatically adapted to [b, l, d, n] during the operation.
+        deltaA = dt_expanded * A  # The result has shape [b, l, d, n] thanks to broadcasting
 
-        # Moltiplicazione elemento per elemento
-        deltaA = dt_expanded * A_expanded
+        #! EXPANSION OF deltaB_u = torch.einsum('bld,bld,bln->bldn', dt, u, B)
+        # Element-wise multiplication of dt and u
+        dt_u_product = dt * u  # The result has shape (b, l, d)
 
-        # ESPANSIONE DI deltaB_u = torch.einsum('bld,bld,bln->bldn', dt, u, B)
-        # Passo 1: Moltiplicazione elemento per elemento di dt e u
-        dt_u_product = dt * u  # Il risultato ha forma (b, l, d)
-
-        # Passo 2: Espandi il risultato aggiungendo una nuova dimensione per il broadcasting
-        dt_u_expanded = dt_u_product.unsqueeze(-1)  # Aggiunge una dimensione fittizia alla fine, forma (b, l, d, 1)
-
-        # Passo 3: Espandi B per il broadcasting
-        B_expanded = B.unsqueeze(2)  # Aggiunge una dimensione fittizia nella terza posizione, forma (b, l, 1, n)
-
-        # Passo 4: Moltiplicazione elemento per elemento con broadcasting
-        deltaB_u = dt_u_expanded * B_expanded  # Il risultato ha forma (b, l, d, n)
+        # Adds a dummy dimension at the end, shape of dt_u_product = (b, l, d, 1)
+        # Adds a dummy dimension in the third position, shape of B = (b, l, 1, n)
+        # Element-wise multiplication with broadcasting
+        deltaB_u = dt_u_product.unsqueeze(-1) * B.unsqueeze(2)  # The result has shape (b, l, d, n)
 
         # Perform selective scan (see scan_SSM() in The Annotated S4 [2])
         # ! Note that the below is sequential, while the official implementation does a much faster parallel scan that
@@ -353,15 +348,11 @@ class MambaBlock(nn.Module):
         x = deltaB_u * dA_cumsum
         x = x.cumsum(1) / (dA_cumsum + 1e-12)
 
-        # ESPANSIONE DI y = torch.einsum('bldn,bln->bld', x, C)
-        # Espandi C per il broadcasting
-        C_expanded = C.unsqueeze(2)  # La forma diventa (b, l, 1, n)
-
-        # Moltiplica x e C con broadcasting
-        product = torch.mul(x, C_expanded)
-
-        # Somma lungo l'asse n per ottenere la forma finale (b, l, d)
-        y = torch.sum(product, dim=-1)
+        #! EXPANSION OF y = torch.einsum('bldn,bln->bld', x, C)
+        # Shape becomes C = (b, l, 1, n)
+        # Multiply x and C with broadcasting
+        # Sum along the n axis to get the final shape (b, l, d)
+        y = torch.sum(torch.mul(x, C.unsqueeze(2)), dim=-1)
     
         return y + u * D # D skip connection
 
